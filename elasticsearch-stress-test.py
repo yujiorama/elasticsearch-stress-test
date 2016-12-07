@@ -44,6 +44,7 @@ parser.add_argument("--es_address", nargs='+', help="The address of your cluster
 parser.add_argument("--indices", type=int, help="The number of indices to write to for each ip", required=True)
 parser.add_argument("--documents", type=int, help="The number different documents to write for each ip", required=True)
 parser.add_argument("--clients", type=int, help="The number of clients to write from for each ip", required=True)
+parser.add_argument("--search-clients", type=int, help="The number of clients to perform searches for each ip", required=True)
 parser.add_argument("--seconds", type=int, help="The number of seconds to run for each ip", required=True)
 parser.add_argument("--number-of-shards", type=int, default=3, help="Number of shards per index (default 3)")
 parser.add_argument("--number-of-replicas", type=int, default=1, help="Number of replicas per index (default 1)")
@@ -64,6 +65,7 @@ args = parser.parse_args()
 NUMBER_OF_INDICES = args.indices
 NUMBER_OF_DOCUMENTS = args.documents
 NUMBER_OF_CLIENTS = args.clients
+NUMBER_OF_SEARCH_CLIENTS = args.search_clients
 NUMBER_OF_SECONDS = args.seconds
 NUMBER_OF_SHARDS = args.number_of_shards
 NUMBER_OF_REPLICAS = args.number_of_replicas
@@ -80,6 +82,8 @@ STARTED_TIMESTAMP = 0
 # Placeholders
 success_bulks = 0
 failed_bulks = 0
+success_searches = 0
+failed_searches = 0
 total_size = 0
 indices = []
 documents = []
@@ -89,6 +93,8 @@ es = None  # Will hold the elasticsearch session
 # Thread safe
 success_lock = Lock()
 fail_lock = Lock()
+search_success_lock = Lock()
+search_fail_lock = Lock()
 size_lock = Lock()
 shutdown_event = Event()
 
@@ -106,6 +112,17 @@ def increment_success():
         # Release the lock
         success_lock.release()
 
+def increment_search_success():
+    # First, lock
+    search_success_lock.acquire()
+    global  success_searches
+    try:
+        # Increment counter
+        success_searches += 1
+
+    finally:  # Just in case
+        # Release the lock
+        search_success_lock.release()
 
 def increment_failure():
     # First, lock
@@ -119,6 +136,17 @@ def increment_failure():
         # Release the lock
         fail_lock.release()
 
+def increment_search_failure():
+    # First, lock
+    search_fail_lock.acquire()
+    global failed_searches
+    try:
+        # Increment counter
+        failed_searches += 1
+
+    finally:  # Just in case
+        # Release the lock
+        search_fail_lock.release()
 
 def increment_size(size):
     # First, lock
@@ -187,7 +215,6 @@ def fill_documents(documents_templates):
 
         documents.append(temp_doc)
 
-
 def client_worker(es, indices, STARTED_TIMESTAMP):
     # Running until timeout
     while (not has_timeout(STARTED_TIMESTAMP)) and (not shutdown_event.is_set()):
@@ -215,6 +242,32 @@ def client_worker(es, indices, STARTED_TIMESTAMP):
             # Failed. incrementing failure
             increment_failure()
 
+def client_search_worker(es, indices, STARTED_TIMESTAMP):
+    # Running until timeout
+    while (not has_timeout(STARTED_TIMESTAMP)) and (not shutdown_event.is_set()):
+
+        doc_key, doc_value = choice(choice(documents).items())
+        body = {
+            "query": {
+                "match": {
+                    "_all": doc_value
+                }
+            }
+        }
+
+        try:
+            # Perform the bulk operation
+            es.search(index=choice(indices), body=body)
+
+            # Adding to success bulks
+            increment_search_success()
+
+        except Exception as e:
+            print(e)
+
+            # Failed. incrementing failure
+            increment_search_failure()
+
 
 def generate_clients(es, indices, STARTED_TIMESTAMP):
     # Clients placeholder
@@ -227,6 +280,14 @@ def generate_clients(es, indices, STARTED_TIMESTAMP):
 
         # Create a thread and push it to the list
         temp_clients.append(temp_thread)
+
+    for _ in range(NUMBER_OF_SEARCH_CLIENTS):
+        temp_thread = Thread(target=client_search_worker, args=[es, indices, STARTED_TIMESTAMP])
+        temp_thread.daemon = True
+
+        # Create a thread and push it to the list
+        temp_clients.append(temp_thread)
+
 
     # Return the clients
     return temp_clients
@@ -298,6 +359,9 @@ def print_stats(STARTED_TIMESTAMP):
     print("Successful bulks: {0} ({1} documents)".format(success_bulks, (success_bulks * BULK_SIZE)))
     print("Failed bulks: {0} ({1} documents)".format(failed_bulks, (failed_bulks * BULK_SIZE)))
     print("Indexed approximately {0} MB which is {1:.2f} MB/s".format(size_mb, mbs))
+    print("Successful searches: {0}".format(success_searches))
+    print("Failed searches: {0}".format(failed_searches))
+
     print("")
 
 
@@ -359,7 +423,7 @@ def main():
             cleanup_indices(es, indices)
             continue
 
-        print("Generating documents and workers.. ")  # Generate the clients
+        print("Generating workers.. ")  # Generate the clients
         clients.extend(generate_clients(es, indices, STARTED_TIMESTAMP))
 
         print("Done!")
