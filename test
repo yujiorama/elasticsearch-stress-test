@@ -1,0 +1,34 @@
+#!/bin/bash
+set -eu
+
+SCRIPTDIR=$(readlink -m $(dirname $0))
+
+TEST_CONFIG=${TEST_CONFIG:-${SCRIPTDIR}/test.conf}
+LOG_DIR=${LOG_DIR:-${SCRIPTDIR}}
+
+if [[ ! -e "${TEST_CONFIG}" ]]; then
+    echo "${TEST_CONFIG} not found"
+    exit 1
+fi
+LOG_PREFIX=$(basename "${TEST_CONFIG}" | sed -e 's/\..*$//')
+
+source "${TEST_CONFIG}"
+for bc in ${BULK_CLIENTS}; do
+for bs in ${BULK_SIZE}; do
+  "${PYTHON}" "${SCRIPTDIR}/elasticsearch-stress-test.py" \
+    --es_address ${ES_ADDRESS} \
+    --indices ${INDICES} \
+    --number_of_shards ${NUMBER_OF_SHARDS} \
+    --number_of_replicas ${NUMBER_OF_REPLICAS} \
+    --documents ${DOCUMENTS} \
+    --max_fields_per_document ${MAX_FIELDS_PER_DOCUMENT} \
+    --max_size_per_field ${MAX_SIZE_PER_FIELD} \
+    --search_clients ${SEARCH_CLIENTS} \
+    --search_result_size ${SEARCH_RESULT_SIZE} \
+    --seconds ${SECONDS} \
+    --stats_frequency ${SECONDS} \
+    --bulk_clients ${bc} \
+    --bulk_size ${bs} \
+    | tee ${LOG_DIR}/${LOG_PREFIX}_${bc}_${bs}.log
+done
+done

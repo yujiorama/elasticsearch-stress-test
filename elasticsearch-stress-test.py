@@ -42,20 +42,21 @@ parser = argparse.ArgumentParser()
 # Adds all params
 parser.add_argument("--es_address", nargs='+', help="The address of your cluster (no protocol or port)", required=True)
 parser.add_argument("--indices", type=int, help="The number of indices to write to for each ip", required=True)
+parser.add_argument("--number_of_shards", type=int, default=3, help="Number of shards per index (default 3)")
+parser.add_argument("--number_of_replicas", type=int, default=1, help="Number of replicas per index (default 1)")
 parser.add_argument("--documents", type=int, help="The number different documents to write for each ip", required=True)
-parser.add_argument("--clients", type=int, help="The number of clients to write from for each ip", required=True)
-parser.add_argument("--search-clients", type=int, help="The number of clients to perform searches for each ip", required=True)
-parser.add_argument("--seconds", type=int, help="The number of seconds to run for each ip", required=True)
-parser.add_argument("--number-of-shards", type=int, default=3, help="Number of shards per index (default 3)")
-parser.add_argument("--number-of-replicas", type=int, default=1, help="Number of replicas per index (default 1)")
-parser.add_argument("--bulk-size", type=int, default=1000, help="Number of document per request (default 1000)")
-parser.add_argument("--max-fields-per-document", type=int, default=100,
+parser.add_argument("--max_fields_per_document", type=int, default=100,
                     help="Max number of fields in each document (default 100)")
-parser.add_argument("--max-size-per-field", type=int, default=1000, help="Max content size per field (default 1000")
-parser.add_argument("--no-cleanup", default=False, action='store_true', help="Don't delete the indices upon finish")
-parser.add_argument("--stats-frequency", type=int, default=30,
+parser.add_argument("--max_size_per_field", type=int, default=1000, help="Max content size per field (default 1000")
+parser.add_argument("--bulk_clients", type=int, help="The number of clients to write from for each ip", required=True)
+parser.add_argument("--bulk_size", type=int, default=1000, help="Number of document per request (default 1000)")
+parser.add_argument("--search_clients", type=int, help="The number of clients to perform searches for each ip", required=True)
+parser.add_argument("--search_result_size", type=int, default=20, help="Number of search result size (default 20)")
+parser.add_argument("--seconds", type=int, help="The number of seconds to run for each ip", required=True)
+parser.add_argument("--stats_frequency", type=int, default=30,
                     help="Number of seconds to wait between stats prints (default 30)")
-parser.add_argument("--not-green", dest="green", action="store_false")
+parser.add_argument("--no_cleanup", default=False, action='store_true', help="Don't delete the indices upon finish")
+parser.add_argument("--not_green", dest="green", action="store_false")
 parser.set_defaults(green=True)
 
 # Parse the arguments
@@ -63,17 +64,18 @@ args = parser.parse_args()
 
 # Set variables from argparse output (for readability)
 NUMBER_OF_INDICES = args.indices
-NUMBER_OF_DOCUMENTS = args.documents
-NUMBER_OF_CLIENTS = args.clients
-NUMBER_OF_SEARCH_CLIENTS = args.search_clients
-NUMBER_OF_SECONDS = args.seconds
 NUMBER_OF_SHARDS = args.number_of_shards
 NUMBER_OF_REPLICAS = args.number_of_replicas
-BULK_SIZE = args.bulk_size
+NUMBER_OF_DOCUMENTS = args.documents
 MAX_FIELDS_PER_DOCUMENT = args.max_fields_per_document
 MAX_SIZE_PER_FIELD = args.max_size_per_field
-NO_CLEANUP = args.no_cleanup
+NUMBER_OF_CLIENTS = args.bulk_clients
+BULK_SIZE = args.bulk_size
+NUMBER_OF_SEARCH_CLIENTS = args.search_clients
+SEARCH_RESULT_SIZE = args.search_result_size
+NUMBER_OF_SECONDS = args.seconds
 STATS_FREQUENCY = args.stats_frequency
+NO_CLEANUP = args.no_cleanup
 WAIT_FOR_GREEN = args.green
 
 # timestamp placeholder
@@ -88,6 +90,7 @@ total_size = 0
 indices = []
 documents = []
 documents_templates = []
+search_respones_time = -1
 es = None  # Will hold the elasticsearch session
 
 # Thread safe
@@ -97,7 +100,7 @@ search_success_lock = Lock()
 search_fail_lock = Lock()
 size_lock = Lock()
 shutdown_event = Event()
-
+search_response_lock = Lock()
 
 # Helper functions
 def increment_success():
@@ -163,6 +166,16 @@ def increment_size(size):
         # Release the lock
         size_lock.release()
 
+def average_search_response_time(t):
+    search_response_lock.acquire()
+    global search_response_time
+    try:
+        if search_respones_time < 1:
+            search_respones_time = t
+        else:
+            search_respones_time = int((search_respones_time + t) / 2)
+    finally:
+        search_respones_lock.release()
 
 def has_timeout(STARTED_TIMESTAMP):
     # Match to the timestamp
@@ -175,7 +188,7 @@ def has_timeout(STARTED_TIMESTAMP):
 # Just to control the minimum value globally (though its not configurable)
 def generate_random_int(max_size):
     try:
-        return randint(1, max_size)
+        return randint(int(max_size/2), max_size)
     except:
         print("Not supporting {0} as valid sizes!".format(max_size))
         sys.exit(1)
@@ -237,7 +250,8 @@ def client_worker(es, indices, STARTED_TIMESTAMP):
             # Adding to size (in bytes)
             increment_size(sys.getsizeof(str(curr_bulk)))
 
-        except:
+        except Exception as e:
+            print(e)
 
             # Failed. incrementing failure
             increment_failure()
@@ -252,22 +266,26 @@ def client_search_worker(es, indices, STARTED_TIMESTAMP):
                 "match": {
                     "_all": doc_value
                 }
-            }
+            },
+            "from": generate_random_int(success_bulks * BULK_SIZE),
+            "size": SEARCH_RESULT_SIZE
         }
 
         try:
             # Perform the bulk operation
-            es.search(index=choice(indices), body=body)
+            x1 = int(time.time() * 1000)
+            results = es.search(index=choice(indices), body=body)
+            x2 = int(time.time() * 1000)
 
             # Adding to success bulks
             increment_search_success()
+            average_search_response_time(x2 - x1)
 
         except Exception as e:
             print(e)
 
             # Failed. incrementing failure
             increment_search_failure()
-
 
 def generate_clients(es, indices, STARTED_TIMESTAMP):
     # Clients placeholder
@@ -321,7 +339,9 @@ def generate_indices(es):
         try:
             # And create it in ES with the shard count and replicas
             es.indices.create(index=temp_index, body={"settings": {"number_of_shards": NUMBER_OF_SHARDS,
-                                                                   "number_of_replicas": NUMBER_OF_REPLICAS}})
+                                                                   "number_of_replicas": NUMBER_OF_REPLICAS,
+                                                                   "index.refresh_interval": "-1",
+                                                                   "index.merge.scheduler.max_thread_count": 1}})
 
         except:
             print("Could not create index. Is your cluster ok?")
@@ -344,7 +364,6 @@ def cleanup_indices(es, indices):
 def print_stats(STARTED_TIMESTAMP):
     # Calculate elpased time
     elapsed_time = (int(time.time()) - STARTED_TIMESTAMP)
-
     # Calculate size in MB
     size_mb = total_size / 1024 / 1024
 
@@ -361,6 +380,7 @@ def print_stats(STARTED_TIMESTAMP):
     print("Indexed approximately {0} MB which is {1:.2f} MB/s".format(size_mb, mbs))
     print("Successful searches: {0}".format(success_searches))
     print("Failed searches: {0}".format(failed_searches))
+    print("Average Response Time searches: {0} ms".format(search_respones_time))
 
     print("")
 
@@ -396,7 +416,7 @@ def main():
         print("Starting initialization of {0}".format(esaddress))
         try:
             # Initiate the elasticsearch session
-            es = Elasticsearch(esaddress)
+            es = Elasticsearch(hosts=esaddress, timeout=30)
 
         except Exception as e:
             print("Could not connect to elasticsearch!")
@@ -466,7 +486,21 @@ def main():
                 print("Cleaning up created indices.. "),
                 cleanup_indices(es, all_indecies)
 
+    print("\nTest Conditions")
+    print("number of indices: {0}".format(NUMBER_OF_INDICES))
+    print("number of shards: {0}".format(NUMBER_OF_SHARDS))
+    print("number of replicas: {0}".format(NUMBER_OF_REPLICAS))
+    print("number of documents: {0}".format(NUMBER_OF_DOCUMENTS))
+    print("max fields per document: {0}".format(MAX_FIELDS_PER_DOCUMENT))
+    print("max size per field: {0}".format(MAX_SIZE_PER_FIELD))
+    print("number of bulk clients: {0}".format(NUMBER_OF_CLIENTS))
+    print("bulk_size: {0}".format(BULK_SIZE))
+    print("number of search clients: {0}".format(NUMBER_OF_SEARCH_CLIENTS))
+    print("search result size: {0}".format(SEARCH_RESULT_SIZE))
+
     print("\nTest is done! Final results:")
+    print("start time: {0}".format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(STARTED_TIMESTAMP))))
+    print("end time: {0}".format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())))
     print_stats(STARTED_TIMESTAMP)
 
     # Cleanup, unless we are told not to
