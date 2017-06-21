@@ -15,6 +15,7 @@ LOG_PREFIX=$(basename "${TEST_CONFIG}" | sed -e 's/\..*$//')
 source "${TEST_CONFIG}"
 for bc in ${BULK_CLIENTS}; do
 for bs in ${BULK_SIZE}; do
+  source "${TEST_CONFIG}"
   "${PYTHON}" "${SCRIPTDIR}/elasticsearch-stress-test.py" \
     --es_address ${ES_ADDRESS} \
     --indices ${INDICES} \
@@ -29,6 +30,6 @@ for bs in ${BULK_SIZE}; do
     --stats_frequency ${SECONDS} \
     --bulk_clients ${bc} \
     --bulk_size ${bs} \
-    | tee ${LOG_DIR}/${LOG_PREFIX}_${bc}_${bs}.log
+    |& tee ${LOG_DIR}/${LOG_PREFIX}_${bc}_${bs}.log
 done
 done
